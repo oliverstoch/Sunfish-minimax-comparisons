@@ -5,6 +5,14 @@ from __future__ import print_function
 import re, sys, time
 from itertools import count
 from collections import namedtuple
+import random
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from csv import writer
+import csv
+from os import walk
+import os
 
 ###############################################################################
 # Piece-Square tables. Tune these to change sunfish's behaviour
@@ -109,13 +117,12 @@ MATE_LOWER = piece['K'] - 10*piece['Q']
 MATE_UPPER = piece['K'] + 10*piece['Q']
 
 # The table size is the maximum number of elements in the transposition table.
-TABLE_SIZE = 1e7
+TABLE_SIZE = 0
 
 # Constants for tuning search
 QS_LIMIT = 219
 EVAL_ROUGHNESS = 13
-DRAW_TEST = True
-
+DRAW_TEST = False
 
 ###############################################################################
 # Chess logic
@@ -237,17 +244,25 @@ class Searcher:
         self.tp_score = {}
         self.tp_move = {}
         self.history = set()
-        self.nodes = 0
+        self.leafNodes = 0
+        self.totalNodes = 0
+
+    def getLeafNodeCount(self):
+        leafNodeCount = self.leafNodes
+        NodeCount = self.totalNodes
+        self.leafNodes = 0
+        self.NodeCount = 0
+
+        return leafNodeCount,NodeCount
 
     def bound(self, pos, gamma, depth, root=True):
-        """ returns r where
+        """ returns r  
                 s(pos) <= r < gamma    if gamma > s(pos)
                 gamma <= r <= s(pos)   if gamma <= s(pos)"""
-        self.nodes += 1
-
+        self.totalNodes += 1
         # Depth <= 0 is QSearch. Here any position is searched as deeply as is needed for
         # calmness, and from this point on there is no difference in behaviour depending on
-        # depth, so so there is no reason to keep different depths in the transposition table.
+        # depth, so so there is no reason to keep different depths in the              transposition table.
         depth = max(depth, 0)
 
         # Sunfish is a king-capture engine, so we should always check if we
@@ -255,6 +270,7 @@ class Searcher:
         # the remaining code has to be comfortable with being mated, stalemated
         # or able to capture the opponent king.
         if pos.score <= -MATE_LOWER:
+            self.leafNodes += 1
             return -MATE_UPPER
 
         # We detect 3-fold captures by comparing against previously
@@ -264,6 +280,8 @@ class Searcher:
         # This is what prevents a search instability.
         # FIXME: This is not true, since other positions will be affected by
         # the new values for all the drawn positions.
+
+        ##this  never called since i set to zero
         if DRAW_TEST:
             if not root and pos in self.history:
                 return 0
@@ -272,6 +290,8 @@ class Searcher:
         # We also need to be sure, that the stored search was over the same
         # nodes as the current search.
         entry = self.tp_score.get((pos, depth, root), Entry(-MATE_UPPER, MATE_UPPER))
+        # print(entry.lower,entry.upper)
+   
         if entry.lower >= gamma and (not root or self.tp_move.get(pos) is not None):
             return entry.lower
         if entry.upper < gamma:
@@ -285,11 +305,15 @@ class Searcher:
         def moves():
             # First try not moving at all. We only do this if there is at least one major
             # piece left on the board, since otherwise zugzwangs are too dangerous.
+
             if depth > 0 and not root and any(c in pos.board for c in 'RBNQ'):
+
                 yield None, -self.bound(pos.nullmove(), 1-gamma, depth-3, root=False)
+
             # For QSearch we have a different kind of null-move, namely we can just stop
             # and not capture anything else.
             if depth == 0:
+                self.leafNodes += 1
                 yield None, pos.score
             # Then killer move. We search it twice, but the tp will fix things for us.
             # Note, we don't have to check for legality, since we've already done it
@@ -340,12 +364,11 @@ class Searcher:
             self.tp_score[pos, depth, root] = Entry(best, entry.upper)
         if best < gamma:
             self.tp_score[pos, depth, root] = Entry(entry.lower, best)
-
         return best
 
-    def search(self, pos, history=()):
+    def search(self, pos, history,depths):
+
         """ Iterative deepening MTD-bi search """
-        self.nodes = 0
         if DRAW_TEST:
             self.history = set(history)
             # print('# Clearing table due to new history')
@@ -353,97 +376,545 @@ class Searcher:
 
         # In finished games, we could potentially go far enough to cause a recursion
         # limit exception. Hence we bound the ply.
-        for depth in range(1, 1000):
-            # The inner loop is a binary search on the score of the position.
-            # Inv: lower <= score <= upper
-            # 'while lower != upper' would work, but play tests show a margin of 20 plays
-            # better.
-            lower, upper = -MATE_UPPER, MATE_UPPER
-            while lower < upper - EVAL_ROUGHNESS:
-                gamma = (lower+upper+1)//2
-                score = self.bound(pos, gamma, depth)
-                if score >= gamma:
-                    lower = score
-                if score < gamma:
-                    upper = score
-            # We want to make sure the move to play hasn't been kicked out of the table,
-            # So we make another call that must always fail high and thus produce a move.
-            self.bound(pos, lower, depth)
-            # If the game hasn't finished we can retrieve our move from the
-            # transposition table.
-            yield depth, self.tp_move.get(pos), self.tp_score.get((pos, depth, True)).lower
 
 
-###############################################################################
-# User interface
-###############################################################################
 
-# Python 2 compatability
-if sys.version_info[0] == 2:
-    input = raw_input
+        # for depth in range(depths, depths+1): (this is now unessarey as the iteration deeping is done in maingame)
+        depth = depths
+        # The inner loop is a binary search on the score of the position.
+        # Inv: lower <= score <= upper
+        # 'while lower != upper' would work, but play tests show a margin of 20 plays
+        # better.
+        lower, upper = -MATE_UPPER, MATE_UPPER
+        while lower < upper - EVAL_ROUGHNESS:
+            gamma = (lower+upper+1)//2
+            score = self.bound(pos, gamma, depth)
+            if score >= gamma:
+                lower = score
+            if score < gamma:
+                upper = score
+        # We want to make sure the move to play hasn't been kicked out of the table,
+        # So we make another call that must always fail high and thus produce a move.
+        self.bound(pos, lower, depth)
+        # If the game hasn't finished we can retrieve our move from the
+        # transposition table.
+
+        yield depth, self.tp_move.get(pos), self.tp_score.get((pos, depth, True)).lower
+
+class BotFactory():
+
+    def createBot(self, method):
+        if method == "mm":
+            return mmBot(Bot)
+
+class randomBot():
+    def __init__(self):
+        self.leafNodes = 0
+        self.name=  "randomBot"
+
+    def move(self, pos, depth):
+        return self.randomPlayer(pos)
+
+    def randomPlayer(self,pos):
+        moves=list(pos.gen_moves())
+        r=random.randint(0, len(moves)-1)
+        return -1,moves[r]
+    def getLeafNodeCount(self):
+        return 0
+
+class mmBot():
+
+    def __init__(self):
+        self.leafNodes = 0
+        self.totalNodes = 0
+        self.name = "mmBot"
+
+
+    def move(self,pos,depth):
+        return  self.mm(pos, depth)
+
+
+    def mm(self, pos,depth):
+
+        #here
+        self.totalNodes += 1
+
+
+        if depth == 0:
+            self.leafNodes += 1
+            return pos.score, None
+
+        if pos.score <= -MATE_LOWER:
+            self.leafNodes += 1
+            return -456787654, None
+
+        bestMove = None
+        minEval = 10090909
+        for move in pos.gen_moves():
+            eval, m = self.mm(pos.move(move), depth - 1)
+            if eval < minEval:
+                minEval = eval
+                bestMove = move
+            # maxEval = max(eval, maxEval)
+        return -minEval, bestMove
+
+    def getLeafNodeCount(self):
+        LeafNodeCount = self.leafNodes
+        self.leafNodes  = 0
+        return LeafNodeCount
+
+class mmRandoBot():
+
+    def __init__(self):
+        self.leafNodes = 0
+        self.name = "mmRandoBot"
+
+    def move(self,pos,depth):
+        return  self.mmrando(pos, depth,-234564322,123526225)
+
+    def mmrando(self,pos, depth,a,b):
+        if depth == 0:
+            self.leafNodes+=1
+            #color*color = 1
+            return pos.score,None
+        if pos.score <= -MATE_LOWER:
+            self.leafNodes+=1
+            return -7898788,None
+
+
+        bestMove = None
+        maxeval = -1009099
+        for move in pos.gen_moves():
+            #my utility is the opposite of my oppnrnts
+            evalOpp, m = self.mmrando(pos.move(move), depth - 1,-b,-a )
+            #so we lose quicker
+            evalMy = -evalOpp- random.randint(0,0)
+            #found a better move
+            if evalMy  > maxeval:
+                maxeval = evalMy
+                bestMove = move
+            # maxEval = max(eval, maxEval)
+            a = max(a, evalMy )
+            if a>=b:
+                break
+
+        if bestMove == None:
+            bestMove =  move
+
+        return maxeval, bestMove
+
+
+    def getLeafNodeCount(self):
+        LeafNodeCount = self.leafNodes
+        self.leafNodes  = 0
+        return LeafNodeCount
+
+class mmabBot():
+    def __init__(self):
+        self.leafNodes = 0
+        self.totalNodes = 0
+        self.name = "mmabBot"
+
+
+    def move(self, pos,depth):
+        return self.mmab(pos, depth,-10000001,10000002)
+
+
+    def mmab(self,pos, depth,a,b):
+        self.totalNodes += 1
+        if depth == 0:
+            self.leafNodes+=1
+            return pos.score,None
+        if pos.score <= -MATE_LOWER:
+            self.leafNodes+=1
+            return -7898788,None
+        bestMove = None
+        maxeval = -MATE_LOWER
+        ## This orders the moves generated, by a huristic pos.value so that more cutoffs are achived.
+        # eg. if is pawn capture, try that first.
+        for move in sorted(pos.gen_moves(), key=pos.value, reverse=True):
+            #my utility is the opposite of my oppnrnts
+            evalOpp, m = self.mmab(pos.move(move), depth - 1,-b,-a )
+            evalMy = -evalOpp
+            #found a better move
+            if evalMy  > maxeval:
+                maxeval = evalMy
+                bestMove = move
+            # maxEval = max(eval, maxEval)
+            a = max(a, evalMy )
+            if a>=b:
+                break
+        return maxeval, bestMove
+
+    def getLeafNodeCount(self):
+        leafNodeCount = self.leafNodes
+        totalNodes = self.totalNodes
+        self.leafNodes  = 0
+        self.totalNodes  = 0
+        return leafNodeCount, totalNodes
+
+class negaScoutBot():
+    def __init__(self):
+        self.leafNodes = 0
+        self.totalNodes = 0
+        self.name = "negaScoutBot"
+
+    def move(self, pos,depth):
+        return self.negaScout(pos, depth,-10000001,10000002)
+
+
+
+    def negaScout(self, pos, depth,a,b, root =True ):
+        self.totalNodes += 1
+        if depth == 0:
+            self.leafNodes+=1
+            return pos.score
+        ## -mate lower dosent work here as for some reson. see repot implementation
+        if pos.score <=-50710:
+            self.leafNodes+=1
+            return pos.score
+        score= -MATE_LOWER
+        n = b
+        moves = []
+        ## This orders the moves generated, by a huristic pos.value so that more cutoffs are achived.
+        # eg. if is pawn capture, try thata first.
+        for m in sorted(pos.gen_moves(), key=pos.value, reverse=True):
+            moves.append(m)
+        for w , move in enumerate(moves):
+            cur = -self.negaScout(pos.move(move),depth - 1, -n,-a,False)
+            if cur > score:
+                if n == b or depth <=2:
+                    score = cur
+                else:
+                    score = -self.negaScout(pos.move(move),depth - 1, -b,-cur,False)
+            if score > a:
+                a =score
+                bestMove = move
+            if a>b:
+                return a
+            n = a+1
+        if root: return score, bestMove
+        return score
+
+    def getLeafNodeCount(self):
+        leafNodeCount = self.leafNodes
+        nodeCount = self.totalNodes
+
+        self.leafNodes  = 0
+        self.totalNodes  = 0
+        return leafNodeCount, nodeCount
+
+class mtd_biBot(Searcher):
+
+    def __init__(self):
+        self.leafNodes = 0
+        self.name = "mtd_biBot"
+
+    def move(self, pos, depth):
+        searcher = Searcher()
+
+        for _depth, move, score in searcher.search(pos, {}, depth):
+            # print("mtd",_depth, move, score)
+            pass
+
+
+        print( "pppp",searcher.bound(pos,0, depth))
+        # _depth, move, score = searcher.search(pos,{})
+
+        self.leafNodes =searcher.getLeafNodeCount()
+        return score,move
+
+    def getLeafNodeCount(self):
+        LeafNodeCount = self.leafNodes
+        self.leafNodes = 0
+        return LeafNodeCount
 
 
 def parse(c):
     fil, rank = ord(c[0]) - ord('a'), int(c[1]) - 1
     return A1 + fil - 10*rank
 
-
 def render(i):
     rank, fil = divmod(i - A1, 10)
     return chr(fil + ord('a')) + str(-rank + 1)
 
-
 def print_pos(pos):
     print()
     uni_pieces = {'R':'♜', 'N':'♞', 'B':'♝', 'Q':'♛', 'K':'♚', 'P':'♟',
-                  'r':'♖', 'n':'♘', 'b':'♗', 'q':'♕', 'k':'♔', 'p':'♙', '.':'·'}
+                  'r':'♖', 'n':'♘', 'b':'♗', 'q':'♕', 'k':'♔', 'p':'♙', '.':'⛝'}
     for i, row in enumerate(pos.board.split()):
         print(' ', 8-i, ' '.join(uni_pieces.get(p, p) for p in row))
     print('    a b c d e f g h \n\n')
 
 
+###############################################################################
+# User interface
+###############################################################################
+def showGraph(botList):
+    for bot in botList:
+        # Load the cvs as a df
+        df = pd.read_csv(bot.name + ".csv")
+
+        with pd.option_context('display.max_rows', None, 'display.max_columns',None):  # more options can be specified also
+            print(df)
+
+        # Get each bots mean nodes expanded at each depth
+        depthLiWhite = []
+        for l in df.mean(axis=0, skipna=True):
+            depthLiWhite.append(l)
+        # plt.plot(range(1, maxDepth + 1), depthLiWhite)
+
+    plt.show()
+
+def playBots(botList,maxDepth, numGamesForPlayer):
+    #this mothos played each bot in bot lists vs a random player,
+    #and appends the number of nodes expanded by a bot at a depth
+    # is stored in a csv file named bot.name
+
+    #
+    for bot in botList:
+        print("Playing ", bot.name,"vs random ","mmRandoBot.name")
+        #play j games
+
+
+        ##add the bot nodes expanded at each depth
+        li = []
+        for j in range(numGamesForPlayer):
+            numNodesEpanded, winner = main_game(bot, mmRandoBot(), maxDepth)
+            print("here",numNodesEpanded)
+            li.append(numNodesEpanded)
+
+        # Add bots depths to its csv file
+        whiteMoveDepths = prosses(li)
+        with open(bot.name+'.csv', 'a', newline='') as f_object:
+            writer_object = writer(f_object)
+            for depthRow in whiteMoveDepths:
+                writer_object.writerow(depthRow)
+            f_object.close()
+
+        # Load the cvs as a df
+        df = pd.read_csv(bot.name+".csv")
+
+        with pd.option_context('display.max_rows', None, 'display.max_columns',None):  # more options can be specified also
+            print(df)
+
+        # Get eacch bots mean nodes expanded at each depth
+        depthLiWhite = []
+        for l in df.mean(axis=0, skipna=True):
+            depthLiWhite.append(l)
+
+
+        plt.plot(range(1,maxDepth+1), depthLiWhite)
+    plt.show()
+
 def main():
+    botList= [mmBot,mmabBot(),negaScoutBot(),mtd_biBot()]
+    playBots(botList,  maxDepth=6, numGamesForPlayer =3)
+    showGraph(botList)
+
+def prosses(li):
+    moveDepths = []
+    for game in li:
+        for move in game:
+            moveDepths.append(move[0])
+    return moveDepths
+# def mtd_bi(searcher,hist):
+#     start = time.time()
+#     for _depth, move, score in searcher.search(hist[-1], hist):
+#         print(_depth, score, move)
+#         if score == 69290:
+#             print("mate found for black by theri bot ")
+#             break
+#         if time.time() - start > 0.000001:
+#             break
+#
+#     return score, move
+#
+# def miniMax_(searcher,hist):
+#     for i in range(1, 3):
+#         # move, score = searcher.miniMaxCall(hist[-1], i, True)
+#
+#         score, move = searcher.miniMax(hist[-1], i, True, False)
+#
+#         print("black my bot at depth", i, move, "score:", score)
+#         if score >= 69290:
+#             print("my bot found  a mate")
+#             break
+#     return  score, move
+#
+#
+# ###minmax
+# def mm_(searcher, hist):
+#     for i in range(1,4):
+#         score, move =  searcher.mm(hist[-1], i)
+#         print("mm black, deptyh score move", i ,score,move)
+#         nodesAtDepth[i]
+#
+#         if score >= MATE_LOWER:
+#             return score, move
+#
+#     return score,move
+# ##minimax with alphabeta
+# def mmab_(searcher,hist):
+#
+#     li = [0]*8
+#     for i in range(1,4):
+#         s,m=searcher.mmab(hist[-1], i, -10000008, 10000008)
+#         li[i-1]=searcher.leafNodesMM
+#
+#         searcher.leafNodesMM = 0
+#         print("mmab depth score move",i,s,m)
+#         if s <= -55000:
+#             return s, m,li
+#         if s > 55000:
+#             return s, m,li
+#
+#     return s,m,li
+# ##negascot
+# def pvs_(searcher,hist):
+#     # bestMove= None
+#     #
+#     # maxScore =-100000000
+#     # for i in range (1,5):
+#     #     for m in hist[-1].gen_moves():
+#     #
+#     #         s =-searcher.pvs(hist[-1].move(m), i, -100000001, 12345677)
+#     #        # s =-searcher.negaScout(hist[-1].move(m), i, -10000000, 12345677)
+#     #
+#     #
+#     #         if s > maxScore:
+#     #             maxScore = s
+#     #             bestMove = m
+#     #         print(maxScore, m,end = "")
+#     #
+#     #     if s <= -50000:
+#     #         return maxScore, bestMove
+#     #     if s > 55000:
+#     #         return maxScore,bestMove
+#     li = [0]*8
+#     for i in range(1,6):
+#         # maxScore,bestMove = searcher.pvs(hist[-1], i, -100000001, 12345677,True)
+#
+#         maxScore,bestMove = searcher.negaScout(hist[-1], i, -100000001, 12345677,True)
+#         li[i-1]=searcher.leafNodesNM
+#         searcher.leafNodesNM = 0
+#         print( maxScore,bestMove)
+#     return maxScore, bestMove,li
+#
+# def random_player(searcher,hist):
+#     return hist[-1].score,searcher.randomPlayer(hist[-1])
+#
+# def nm_(searcher,hist):
+#
+#
+#     for i in range(1,5):
+#
+#         s,m = searcher.nm(hist[-1], i, 1, hist,-1999341124,12345654333)
+#
+#
+#         print("score move ddepth", s,m,i)
+#
+#         if s <=-50000:
+#             return s,m
+#         if s > 55000:
+#             return s, m
+#     return s,m
+#
+def isDraw(hist):
+    ##this method was written by Oliver
+    c = 0
+    for po in hist[::-1]:
+        if po == hist[-1]: c += 1
+        if c == 3:
+            return True
+
+def poltNodes(nodesEpanded):
+
+
+    with pd.option_context('display.max_rows', None, 'display.max_columns', None):  # more options can be specified also
+        print(dfw)
+
+
+
+
+    plt.plot([1, 2, 3], depthLiWhite)
+    plt.plot([1, 2, 3 ], depthLiBlack)
+    plt.legend(["Dataset 1", "Dataset 2"])
+
+    plt.show()
+
+def main_game(whiteBot,blackBot, plys):
     hist = [Position(initial, 0, (True,True), (True,True), 0, 0)]
     searcher = Searcher()
+
+    numNodesEpanded = []
+
     while True:
+        print("---------------------------------------------------")
         print_pos(hist[-1])
+        if isDraw(hist):
+            print("draw!!!")
+            return numNodesEpanded, 0
+        ##white to play
 
         if hist[-1].score <= -MATE_LOWER:
-            print("You lost")
-            break
+            print("black won")
+            return numNodesEpanded, -1
 
-        # We query the user until she enters a (pseudo) legal move.
-        move = None
-        while move not in hist[-1].gen_moves():
-            match = re.match('([a-h][1-8])'*2, input('Your move: '))
-            if match:
-                move = parse(match.group(1)), parse(match.group(2))
-            else:
-                # Inform the user when invalid input (e.g. "help") is entered
-                print("Please enter a move like g8f6")
+        # start = time.time()
+        depth=0
+        nodesAtDepthW = []
+        # white start - time.time()<1
+        while depth < plys:
+            depth+=1
+
+            score, move = whiteBot.move(hist[-1], depth)
+            ##get and reset leaf nodes
+            ln, tn=whiteBot.getLeafNodeCount()
+            print(whiteBot.name, "Score: ", score,"move: ", move ,"depth:",depth,"nodes expanded",tn)
+
+
+            nodesAtDepthW.append(ln)
+            # exit if loosing !
+
+
+
+
+        ##make move for white ie. the move set in the last, deeest iteration
         hist.append(hist[-1].move(move))
-
-        # After our move we rotate the board and print it again.
-        # This allows us to see the effect of our move.
         print_pos(hist[-1].rotate())
 
         if hist[-1].score <= -MATE_LOWER:
-            print("You won")
-            break
+            print("white won")
+            return numNodesEpanded, 1
 
-        # Fire up the engine to look for a move.
-        start = time.time()
-        for _depth, move, score in searcher.search(hist[-1], hist):
-            if time.time() - start > 1:
+
+        ## black to play
+
+        # score, move,numLeafExpBlack = blackStg(searcher,hist)
+        # numNodesEpanded.append([numLeafExpWhite,numLeafExpBlack])
+
+        # start = time.time()
+
+        depth=0
+        nodesAtDepthB = []
+        r = random.randint(2, 3)
+        while(depth<r):
+            depth+=1
+            score, move = blackBot.move(hist[-1], depth)
+            n=blackBot.getLeafNodeCount()
+
+            #break if lost
+            if score<=-MATE_LOWER:
                 break
-
-        if score == MATE_UPPER:
-            print("Checkmate!")
-
-        # The black player moves from a rotated position, so we have to
-        # 'back rotate' the move before printing it.
-        print("My move:", render(119-move[0]) + render(119-move[1]))
+            print(score, move ,depth,n)
+            nodesAtDepthB.append(n)
+        numNodesEpanded.append([nodesAtDepthW,nodesAtDepthB])
+        print("blacks move, score", move, score)
         hist.append(hist[-1].move(move))
+
+
+
 
 
 if __name__ == '__main__':
